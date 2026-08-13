@@ -1,0 +1,251 @@
+// Quant Terminal — data model
+// Postgres via Prisma. Run `npm run db:migrate` after `docker compose up -d`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  createdAt    DateTime @default(now())
+  onboardedAt  DateTime?
+
+  watchlists    Watchlist[]
+  paperAccounts PaperAccount[]
+  journalEntries JournalEntry[]
+  alerts        Alert[]
+  backtestRuns  BacktestRun[]
+}
+
+// ── Watchlists ──────────────────────────────────────────────────────
+
+model Watchlist {
+  id        String          @id @default(cuid())
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int             @default(0)
+  createdAt DateTime        @default(now())
+  items     WatchlistItem[]
+
+  @@index([userId])
+}
+
+model WatchlistItem {
+  id          String    @id @default(cuid())
+  watchlistId String
+  watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  ticker      String
+  sortOrder   Int       @default(0)
+  addedAt     DateTime  @default(now())
+
+  @@unique([watchlistId, ticker])
+}
+
+// ── Paper trading ───────────────────────────────────────────────────
+
+model PaperAccount {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String   @default("Paper Account")
+  startingBalance Decimal @db.Decimal(18, 2)
+  cashBalance    Decimal  @db.Decimal(18, 2)
+  commissionPerOrder Decimal @db.Decimal(10, 4) @default(0)
+  slippageBps    Int      @default(0) // basis points applied to simulated fills
+  createdAt      DateTime @default(now())
+
+  positions PaperPosition[]
+  orders    PaperOrder[]
+  journalEntries JournalEntry[]
+  equitySnapshots EquitySnapshot[]
+
+  @@index([userId])
+}
+
+model PaperPosition {
+  id             String       @id @default(cuid())
+  accountId      String
+  account        PaperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  ticker         String
+  quantity       Decimal      @db.Decimal(18, 6)
+  avgCostBasis   Decimal      @db.Decimal(18, 4)
+  openedAt       DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([accountId, ticker])
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+}
+
+enum OrderStatus {
+  FILLED
+  CANCELLED
+  REJECTED
+}
+
+model PaperOrder {
+  id            String       @id @default(cuid())
+  accountId     String
+  account       PaperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  ticker        String
+  side          OrderSide
+  type          OrderType
+  quantity      Decimal      @db.Decimal(18, 6)
+  limitPrice    Decimal?     @db.Decimal(18, 4)
+  fillPrice     Decimal?     @db.Decimal(18, 4)
+  commission    Decimal      @db.Decimal(10, 4) @default(0)
+  status        OrderStatus
+  placedAt      DateTime     @default(now())
+  filledAt      DateTime?
+  realizedPnl   Decimal?     @db.Decimal(18, 4) // set on closing SELL orders
+
+  journalEntry  JournalEntry?
+
+  @@index([accountId])
+}
+
+model EquitySnapshot {
+  id         String       @id @default(cuid())
+  accountId  String
+  account    PaperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  takenAt    DateTime     @default(now())
+  equity     Decimal      @db.Decimal(18, 2)
+  cash       Decimal      @db.Decimal(18, 2)
+
+  @@index([accountId, takenAt])
+}
+
+// ── Trade journal ───────────────────────────────────────────────────
+
+model JournalEntry {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        PaperAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  orderId        String?       @unique
+  order          PaperOrder?   @relation(fields: [orderId], references: [id])
+  ticker         String
+  thesis         String
+  setup          String?
+  confidence     Int?          // 0-100, user's own stated confidence
+  timeHorizon    String?       // e.g. "swing", "day", "position"
+  notes          String?
+  outcomeNotes   String?
+  aiReview       String?       // generated once the trade is closed
+  createdAt      DateTime      @default(now())
+  closedAt       DateTime?
+
+  @@index([userId])
+}
+
+// ── AI signal history (for the Performance page) ────────────────────
+
+enum SignalType {
+  STRONG_BUY
+  BUY
+  HOLD
+  SELL
+  STRONG_SELL
+}
+
+model SignalRecord {
+  id           String     @id @default(cuid())
+  ticker       String
+  signal       SignalType
+  confidence   Int        // 0-100
+  priceAtSignal Decimal   @db.Decimal(18, 4)
+  modelVersion String
+  features     Json       // snapshot of the feature vector used
+  createdAt    DateTime   @default(now())
+
+  outcomes SignalOutcome[]
+
+  @@index([ticker, createdAt])
+}
+
+model SignalOutcome {
+  id             String       @id @default(cuid())
+  signalId       String
+  signal         SignalRecord @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  horizonDays    Int
+  priceAtHorizon Decimal      @db.Decimal(18, 4)
+  returnPct      Decimal      @db.Decimal(10, 4)
+  evaluatedAt    DateTime     @default(now())
+
+  @@unique([signalId, horizonDays])
+}
+
+// ── Backtesting ─────────────────────────────────────────────────────
+
+model BacktestRun {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticker      String
+  ruleConfig  Json
+  startDate   DateTime
+  endDate     DateTime
+  totalReturn Decimal  @db.Decimal(10, 4)
+  winRate     Decimal  @db.Decimal(6, 4)
+  trades      Int
+  maxDrawdown Decimal  @db.Decimal(10, 4)
+  profitFactor Decimal? @db.Decimal(10, 4)
+  equityCurve Json
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ── Alerts ───────────────────────────────────────────────────────────
+
+enum AlertCondition {
+  SIGNAL_CHANGE
+  OPPORTUNITY_SCORE_ABOVE
+  RISK_SCORE_ABOVE
+  PRICE_MOVE_PCT
+  VOLUME_UNUSUAL
+  VOLATILITY_CHANGE
+  BREAKOUT
+  BREAKDOWN
+  NEWS_EVENT
+  EARNINGS_EVENT
+}
+
+enum AlertStatus {
+  ACTIVE
+  TRIGGERED
+  DISMISSED
+}
+
+model Alert {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticker    String
+  condition AlertCondition
+  threshold Decimal?       @db.Decimal(18, 4)
+  status    AlertStatus    @default(ACTIVE)
+  createdAt DateTime       @default(now())
+  triggeredAt DateTime?
+  note      String?
+
+  @@index([userId, status])
+}
